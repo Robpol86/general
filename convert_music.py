@@ -130,10 +130,14 @@ def find_inconsistent_tags(flac_filepaths, ignore_art=False, ignore_lyrics=False
         # Verify numeric tags.
         if not f_date.isdigit():
             messages[path].append("Filename date not a number.")
+        elif len(f_date) != 4:
+            messages[path].append("Filename date not four digits.")
         elif f_date != t_date:
             messages[path].append("Date mismatch: {} != {}".format(f_date, t_date))
         if not f_track.isdigit():
             messages[path].append("Filename track number not a number.")
+        elif len(f_track) != 2:
+            messages[path].append("Filename track number not two digits.")
         elif f_track != t_track:
             messages[path].append("Track number mismatch: {} != {}".format(f_track, t_track))
         # Check for lyrics and album art.
