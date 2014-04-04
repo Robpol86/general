@@ -25,6 +25,7 @@ import logging.config
 import os
 import signal
 import sys
+import threading
 from docopt import docopt
 from mutagen.flac import FLAC, error
 from mutagen.id3 import ID3
@@ -32,11 +33,35 @@ from color_logging_misc import LoggingSetup, Color
 
 
 __program__ = 'convert_music'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
+
+
+class ConvertFiles(threading.Thread):
+    """Threaded class that does the actual file conversion. This also copies over the id3 tags.
+
+    Class variables are to be set before threads are started.
+
+    Class variables:
+    FLAC_BIN -- file path to the FLAC binary. It handles decompressing FLAC files to wav files.
+    LAME_BIN -- file path to the lame binary. It handles compressing wav files into mp3 files.
+    """
+    FLAC_BIN = ''
+    LAME_BIN = ''
+
+    def __init__(self, queue):
+        """
+        Positional arguments:
+        queue -- Queue.Queue() instance, whose items are 2-value tuples: ('source_mp3_path', 'destination_flac_path').
+        """
+        super(ConvertFiles, self).__init__()
+        self.queue = queue
+
+    def run(self):
+        pass
 
 
 def find_files(flac_dir, mp3_dir):
-    """Finds FLAC and mp3 files. Returns list of FLAC files to be converted, and list of mp3 files to be deleted.
+    """Finds FLAC and mp3 files. Returns a tuple of different data (refer to Returns section in this docstring).
     FLAC files that don't need converting (and mp3 files that don't need deleting) are omitted. Metadata is stored in
     mp3 file id3 tags under "comments". This function uses that metadata to determine which files do what.
 
@@ -48,10 +73,12 @@ def find_files(flac_dir, mp3_dir):
     flac_files -- dictionary of FLAC file paths (keys) and 2-value lists (values), [file mtime, file byte size].
     delete_mp3s -- list of mp3 files to be deleted.
     create_dirs -- list of directories that need to be created in the destination parent directory for future mp3s.
+    foreign_files -- list of non-mp3 files in the mp3 directory which interfere with find_empty_dirs().
     """
     flac_files = dict()  # {/file/path.flac: [mtime, bytesize]}
     delete_mp3s = list()  # List of mp3 file paths to be deleted.
     create_dirs = list()  # Directories to be created in mp3_dir.
+
     # First find every single FLAC file and store it in the flac_files dictionary.
     for root, _, files in os.walk(flac_dir):
         for path in (os.path.join(root, filename) for filename in fnmatch.filter(files, '*.flac')):
@@ -60,6 +87,7 @@ def find_files(flac_dir, mp3_dir):
     if not flac_files:
         # No FLAC files found at all, wrong directory maybe.
         raise IOError
+
     # Find every single mp3, and decide its fate with its own metadata.
     for path in (os.path.join(r, f) for r, _, fl in os.walk(mp3_dir) for f in fnmatch.filter(fl, '*.mp3')):
         flac_equivalent = path.replace(mp3_dir, flac_dir).replace('.mp3', '.flac')
@@ -84,12 +112,16 @@ def find_files(flac_dir, mp3_dir):
             continue
         # Made it this far. That means nothing has changed with the mp3 or FLAC. Removing FLAC from "convert me" list.
         flac_files.pop(flac_equivalent)
+
+    # Find non-mp3 files in the mp3 directory.
+    foreign_files = sorted([os.path.join(r, f) for r, _, fl in os.walk(mp3_dir) for f in fl if not f.endswith('.mp3')])
+
     # Figure out which directories should be created.
     for directory in {os.path.dirname(f.replace(flac_dir, mp3_dir)) for f in flac_files}:
         if not os.path.exists(directory):
             create_dirs.append(directory)
     create_dirs.sort()
-    return flac_files, delete_mp3s, create_dirs
+    return flac_files, delete_mp3s, create_dirs, foreign_files
 
 
 def find_inconsistent_tags(flac_filepaths, ignore_art=False, ignore_lyrics=False):
@@ -149,12 +181,35 @@ def find_inconsistent_tags(flac_filepaths, ignore_art=False, ignore_lyrics=False
     return {k: v for k, v in messages.items() if v}
 
 
+def find_empty_dirs(parent_dir):
+    """Returns a list of directories that are empty or contain empty directories.
+
+    Positional arguments:
+    parent_dir -- parent directory string to search.
+
+    Returns:
+    List of empty directories or directories that contain empty directories. Remove in order for successful execution.
+    """
+    dirs_to_remove = {r: bool(f) for r, d, f in os.walk(parent_dir)}  # First get all dirs available.
+    dirs_to_remove.pop(parent_dir, None)  # If parent_dir is empty don't include it, just focus on subdirectories.
+    for directory in sorted(dirs_to_remove.keys(), reverse=True):
+        does_dir_have_files = dirs_to_remove.get(directory, False)  # Skip if dir has already been removed from dict.
+        if not does_dir_have_files:
+            continue
+        # Directory has files. Remove entire directory tree from dirs_to_remove.
+        dirs_to_remove.pop(directory)
+        while directory != parent_dir:
+            directory = os.path.split(directory)[0]
+            dirs_to_remove.pop(directory, None)
+    return sorted(dirs_to_remove, reverse=True)
+
+
 def main(config):
     logger = logging.getLogger('%s.main' % __name__)
 
     logger.info("Finding files and verifying tags...")
     try:
-        flac_files, delete_mp3s, create_dirs = find_files(config['flac_dir'], config['mp3_dir'])
+        flac_files, delete_mp3s, create_dirs, foreign_files = find_files(config['flac_dir'], config['mp3_dir'])
     except IOError:
         logger.error("No FLAC files found in directory {}".format(config['flac_dir']))
         sys.exit(1)
@@ -174,6 +229,13 @@ def main(config):
         raw_input(Color("{b}Press Enter to delete these files.{/b}"))
         for path in delete_mp3s:
             os.remove(path)
+
+    # Notify user of foreign files in mp3 directory.
+    if foreign_files:
+        logger.info("{yellow}The following non-mp3 files were found:{/yellow}")
+        for path in foreign_files:
+            logger.info(path)
+        raw_input(Color("{b}Press Enter to continue anyway.{/b}"))
 
     # Notify user of inconsistencies in FLAC id3 tags and file names.
     if tag_warnings:
@@ -229,25 +291,25 @@ def parse_n_check(docopt_config):
     if not os.path.isfile(config['flac_bin']):
         logger.error("--flac-bin-path is not a file or does not exist: {}".format(config['flac_bin']))
         raise ValueError
-    if not os.access(config['flac_bin'], os.R_OK|os.X_OK):
+    if not os.access(config['flac_bin'], os.R_OK | os.X_OK):
         logger.error("--flac-bin-path is not readable or no execute permissions: {}".format(config['flac_bin']))
         raise ValueError
     if not os.path.isfile(config['lame_bin']):
         logger.error("--lame-bin-path is not a file or does not exist: {}".format(config['lame_bin']))
         raise ValueError
-    if not os.access(config['lame_bin'], os.R_OK|os.X_OK):
+    if not os.access(config['lame_bin'], os.R_OK | os.X_OK):
         logger.error("--lame-bin-path is not readable or no execute permissions: {}".format(config['lame_bin']))
         raise ValueError
     if not os.path.isdir(config['flac_dir']):
         logger.error("<flac_dir> is not a directory or does not exist: {}".format(config['flac_dir']))
         raise ValueError
-    if not os.access(config['flac_dir'], os.R_OK|os.X_OK):
+    if not os.access(config['flac_dir'], os.R_OK | os.X_OK):
         logger.error("<flac_dir> is not readable or no execute permissions: {}".format(config['flac_dir']))
         raise ValueError
     if not os.path.isdir(config['mp3_dir']):
         logger.error("<mp3_dir> is not a directory or does not exist: {}".format(config['mp3_dir']))
         raise ValueError
-    if not os.access(config['mp3_dir'], os.W_OK|os.R_OK|os.X_OK):
+    if not os.access(config['mp3_dir'], os.W_OK | os.R_OK | os.X_OK):
         logger.error("<mp3_dir> is not readable, writable, or no execute permissions: {}".format(config['mp3_dir']))
         raise ValueError
     return config
