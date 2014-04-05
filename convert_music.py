@@ -17,6 +17,8 @@ Options:
                                     [default: automatic]
     -y --ignore-lyrics              Ignore checks for missing lyric data.
 """
+from __future__ import print_function, division
+import Queue
 import atexit
 import fnmatch
 import json
@@ -26,6 +28,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from docopt import docopt
 from mutagen.flac import FLAC, error
 from mutagen.id3 import ID3
@@ -42,21 +45,44 @@ class ConvertFiles(threading.Thread):
     Class variables are to be set before threads are started.
 
     Class variables:
-    FLAC_BIN -- file path to the FLAC binary. It handles decompressing FLAC files to wav files.
-    LAME_BIN -- file path to the lame binary. It handles compressing wav files into mp3 files.
+    flac_bin -- file path to the FLAC binary. It handles decompressing FLAC files to wav files.
+    lame_bin -- file path to the lame binary. It handles compressing wav files into mp3 files.
     """
-    FLAC_BIN = ''
-    LAME_BIN = ''
+    flac_bin = ''
+    lame_bin = ''
 
     def __init__(self, queue):
         """
         Positional arguments:
-        queue -- Queue.Queue() instance, whose items are 2-value tuples: ('source_mp3_path', 'destination_flac_path').
+        queue -- Queue.Queue() instance, whose items are 2-value tuples: ('source_flac_path', 'destination_mp3_path').
         """
         super(ConvertFiles, self).__init__()
         self.queue = queue
 
     def run(self):
+        """The main body of the thread. Loops until queue is empty."""
+        logger = logging.getLogger('ConvertFiles.{}'.format(self.name))
+        logger.debug("Worker thread started.")
+        while True:
+            try:
+                source_flac_path, destination_mp3_path = self.queue.get_nowait()
+            except Queue.Empty:
+                break
+            self.convert(source_flac_path, destination_mp3_path)
+            self.write_tags(source_flac_path, destination_mp3_path)
+            self.finalize(source_flac_path, destination_mp3_path)
+        logger.debug("Worker thread exiting.")
+
+    def convert(self, source_flac_path, destination_mp3_path):
+        """Converts the FLAC file into an mp3 file with a temporary filename."""
+        pass
+
+    def write_tags(self, source_flac_path, destination_mp3_path):
+        """Write mp3 id3 tags from tags available in the FLAC file."""
+        pass
+
+    def finalize(self, source_flac_path, destination_mp3_path):
+        """Renames the file to the final file name, and writes metadata in the mp3 file's comment id3 tag."""
         pass
 
 
@@ -247,20 +273,61 @@ def main(config):
                 logger.info('{}: {}'.format(os.path.basename(path), warnings[0]))
             else:
                 if printed_before:
-                    print
+                    print()
                     printed_before = False
                 logger.info('{}:'.format(os.path.basename(path)))
                 for warning in warnings:
                     logger.info(warning)
-                print
+                print()
         raw_input(Color("{b}Press Enter to continue anyway.{/b}"))
 
     # Create directories.
     for directory in create_dirs:
         os.makedirs(directory)
 
+    # Prepare for conversion.
+    ConvertFiles.flac_bin = config['flac_bin']
+    ConvertFiles.lame_bin = config['lame_bin']
+    queue = Queue.Queue()
+    for flac_file in flac_files:
+        mp3_file = flac_file.replace(config['flac_dir'], config['mp3_dir'])  # Change directories from flac to mp3 dir.
+        mp3_file = os.path.splitext(mp3_file)[0] + '.mp3'  # Change file extension from .flac to .mp3.
+        queue.put((flac_file, mp3_file))
+
     # Start the conversion.
-    # TODO
+    total = len(flac_files)
+    count = total
+    logger.info("Converting {} file{}:".format(total, '' if total == 1 else 's'))
+    threads = []
+    for i in range(config['threads']):
+        thread = ConvertFiles(queue)
+        thread.daemon = True  # Fixes script hang on ctrl+c.
+        thread.start()
+        threads.append(thread)
+
+    # Wait for everything to finish.
+    while count:
+        if not config['quiet']:
+            sys.stdout.write('{}/{} ({:02d}%) files remaining...\r'.format(count, total, count / total))
+            sys.stdout.flush()
+        time.sleep(1)
+        count = queue.qsize() + len([True for t in threads if t.is_alive()])
+        # Look for threads that crashed.
+        if len([t for t in threads if t.is_alive()]) < config['threads']:
+            # One or more thread isn't running.
+            if queue.qsize():
+                # But the queue isn't empty, something bad happened.
+                raise RuntimeError("Worker thread(s) prematurely terminated.")
+
+    # Done, now clean up empty directories.
+    empty_dirs = find_empty_dirs(config['mp3_dir'])
+    if empty_dirs:
+        logger.info(Color("{yellow}The following empty directories were found:{/yellow}"))
+        for path in empty_dirs:
+            logger.info(path)
+        raw_input(Color("{b}Press Enter to delete these directories.{/b}"))
+        for path in delete_mp3s:
+            os.rmdir(path)
 
 
 def parse_n_check(docopt_config):
@@ -281,6 +348,7 @@ def parse_n_check(docopt_config):
         threads=docopt_config.get('--threads'),
         flac_dir=os.path.abspath(os.path.expanduser(docopt_config.get('<flac_dir>'))),
         mp3_dir=os.path.abspath(os.path.expanduser(docopt_config.get('<mp3_dir>'))),
+        quiet=False,
     )
     # Sanity checks.
     if config['threads'] == 'automatic':
