@@ -26,6 +26,7 @@ import logging
 import logging.config
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -36,7 +37,7 @@ from color_logging_misc import LoggingSetup, Color
 
 
 __program__ = 'convert_music'
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 
 class ConvertFiles(threading.Thread):
@@ -54,37 +55,57 @@ class ConvertFiles(threading.Thread):
     def __init__(self, queue):
         """
         Positional arguments:
-        queue -- Queue.Queue() instance, whose items are 2-value tuples: ('source_flac_path', 'destination_mp3_path').
+        queue -- Queue.Queue() instance, items are 4-value tuples: ('flac_path', 'temp_wav', 'temp_mp3', 'final_mp3').
         """
         super(ConvertFiles, self).__init__()
         self.queue = queue
 
     def run(self):
         """The main body of the thread. Loops until queue is empty."""
-        logger = logging.getLogger('ConvertFiles.{}'.format(self.name))
+        logger = logging.getLogger('ConvertFiles.run.{}'.format(self.name))
         logger.debug('Worker thread started.')
         while True:
             try:
-                source_flac_path, destination_mp3_path = self.queue.get_nowait()
+                source_flac_path, temp_wav_path, temp_mp3_path, destination_mp3_path = self.queue.get_nowait()
             except Queue.Empty:
                 break
-            logger.debug('Got {}, {}'.format(source_flac_path, destination_mp3_path))
-            self.convert(source_flac_path, destination_mp3_path)
-            self.write_tags(source_flac_path, destination_mp3_path)
-            self.finalize(source_flac_path, destination_mp3_path)
+            logger.debug('Source FLAC path: {}'.format(source_flac_path))
+            logger.debug('Temporary wav path: {}'.format(temp_wav_path))
+            logger.debug('Temporary mp3 path: {}'.format(temp_mp3_path))
+            logger.debug('Final mp3 path: {}'.format(destination_mp3_path))
+            self.convert(source_flac_path, temp_wav_path, temp_mp3_path)
+            self.write_tags(source_flac_path, temp_mp3_path)
+            os.rename(temp_mp3_path, destination_mp3_path)
             logger.debug('Done converting this file.')
         logger.debug('Worker thread exiting.')
 
-    def convert(self, source_flac_path, destination_mp3_path):
+    def convert(self, source_flac_path, temp_wav_path, temp_mp3_path):
         """Converts the FLAC file into an mp3 file with a temporary filename."""
-        pass
+        logger = logging.getLogger('ConvertFiles.convert.{}'.format(self.name))
+        # First decompress.
+        command = [self.flac_bin, '--silent', '--decode', '-o', temp_wav_path, source_flac_path]
+        logger.debug('Command: {}'.format(' '.join(command)))
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        while process.poll() is None:
+            time.sleep(0.2)  # Wait for process to finish.
+        code = process.returncode
+        stdout, stderr = process.communicate()
+        logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        # Then compress.
+        command = [self.lame_bin, '--quiet', '-h', '-V0', temp_wav_path, temp_mp3_path]
+        logger.debug('Command: {}'.format(' '.join(command)))
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        while process.poll() is None:
+            time.sleep(0.2)  # Wait for process to finish.
+        code = process.returncode
+        stdout, stderr = process.communicate()
+        logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        # Delete wav file by-product.
+        logger.debug('Removing: {}'.format(temp_wav_path))
+        os.remove(temp_wav_path)
 
-    def write_tags(self, source_flac_path, destination_mp3_path):
-        """Write mp3 id3 tags from tags available in the FLAC file."""
-        pass
-
-    def finalize(self, source_flac_path, destination_mp3_path):
-        """Renames the file to the final file name, and writes metadata in the mp3 file's comment id3 tag."""
+    def write_tags(self, source_flac_path, temp_mp3_path):
+        """Write mp3 id3 tags from tags available in the FLAC file. Also save metadata as JSON to mp3 comment tag."""
         pass
 
 
@@ -293,8 +314,10 @@ def main(config):
     queue = Queue.Queue()
     for flac_file in flac_files:
         mp3_file = flac_file.replace(config['flac_dir'], config['mp3_dir'])  # Change directories from flac to mp3 dir.
-        mp3_file = os.path.splitext(mp3_file)[0] + '.mp3'  # Change file extension from .flac to .mp3.
-        queue.put((flac_file, mp3_file))
+        temp_wav_file = os.path.splitext(mp3_file)[0] + '.wav.part'  # Temporary file while converting (FLAC -> wav).
+        temp_mp3_file = os.path.splitext(mp3_file)[0] + '.mp3.part'  # Temporary file while converting (wav -> mp3).
+        final_mp3_file = os.path.splitext(mp3_file)[0] + '.mp3'  # Final mp3 filename.
+        queue.put((flac_file, temp_wav_file, temp_mp3_file, final_mp3_file))
 
     # Start the conversion.
     total = len(flac_files)

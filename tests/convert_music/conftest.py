@@ -9,7 +9,7 @@ from color_logging_misc import LoggingSetup
 def log():
     """Initialize logging, to capture log messages."""
     assert '--capture' in sys.argv or '--capture=sys' in sys.argv  # Be sure you run: py.test --capture=sys
-    with LoggingSetup() as cm:
+    with LoggingSetup(verbose=True) as cm:
         logging.config.fileConfig(cm.config)
 
 
