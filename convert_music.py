@@ -91,6 +91,9 @@ class ConvertFiles(threading.Thread):
         code = process.returncode
         stdout, stderr = process.communicate()
         logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        if code:
+            raise RuntimeError('Process {} returned {}; stdout: {}; stderr: {};'.format(self.flac_bin, code, stdout,
+                                                                                        stderr))
         # Then compress.
         command = [self.lame_bin, '--quiet', '-h', '-V0', temp_wav_path, temp_mp3_path]
         logger.debug('Command: {}'.format(' '.join(command)))
@@ -100,6 +103,9 @@ class ConvertFiles(threading.Thread):
         code = process.returncode
         stdout, stderr = process.communicate()
         logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        if code:
+            raise RuntimeError('Process {} returned {}; stdout: {}; stderr: {};'.format(self.lame_bin, code, stdout,
+                                                                                        stderr))
         # Delete wav file by-product.
         logger.debug('Removing: {}'.format(temp_wav_path))
         os.remove(temp_wav_path)
