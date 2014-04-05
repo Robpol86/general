@@ -62,16 +62,18 @@ class ConvertFiles(threading.Thread):
     def run(self):
         """The main body of the thread. Loops until queue is empty."""
         logger = logging.getLogger('ConvertFiles.{}'.format(self.name))
-        logger.debug("Worker thread started.")
+        logger.debug('Worker thread started.')
         while True:
             try:
                 source_flac_path, destination_mp3_path = self.queue.get_nowait()
             except Queue.Empty:
                 break
+            logger.debug('Got {}, {}'.format(source_flac_path, destination_mp3_path))
             self.convert(source_flac_path, destination_mp3_path)
             self.write_tags(source_flac_path, destination_mp3_path)
             self.finalize(source_flac_path, destination_mp3_path)
-        logger.debug("Worker thread exiting.")
+            logger.debug('Done converting this file.')
+        logger.debug('Worker thread exiting.')
 
     def convert(self, source_flac_path, destination_mp3_path):
         """Converts the FLAC file into an mp3 file with a temporary filename."""
@@ -176,33 +178,33 @@ def find_inconsistent_tags(flac_filepaths, ignore_art=False, ignore_lyrics=False
         try:
             tags = FLAC(path)
         except error:
-            messages[path].append("Invalid file.")
+            messages[path].append('Invalid file.')
             continue
         t_artist, t_date, t_album, t_track, t_title = [tags.get(i, [''])[0] for i in tag_names]
         if f_artist != t_artist:
-            messages[path].append("Artist mismatch: {} != {}".format(f_artist, t_artist))
+            messages[path].append('Artist mismatch: {} != {}'.format(f_artist, t_artist))
         if f_album != t_album:
-            messages[path].append("Album mismatch: {} != {}".format(f_album, t_album))
+            messages[path].append('Album mismatch: {} != {}'.format(f_album, t_album))
         if f_title != t_title:
-            messages[path].append("Title mismatch: {} != {}".format(f_title, t_title))
+            messages[path].append('Title mismatch: {} != {}'.format(f_title, t_title))
         # Verify numeric tags.
         if not f_date.isdigit():
-            messages[path].append("Filename date not a number.")
+            messages[path].append('Filename date not a number.')
         elif len(f_date) != 4:
-            messages[path].append("Filename date not four digits.")
+            messages[path].append('Filename date not four digits.')
         elif f_date != t_date:
-            messages[path].append("Date mismatch: {} != {}".format(f_date, t_date))
+            messages[path].append('Date mismatch: {} != {}'.format(f_date, t_date))
         if not f_track.isdigit():
-            messages[path].append("Filename track number not a number.")
+            messages[path].append('Filename track number not a number.')
         elif len(f_track) != 2:
-            messages[path].append("Filename track number not two digits.")
+            messages[path].append('Filename track number not two digits.')
         elif f_track != t_track:
-            messages[path].append("Track number mismatch: {} != {}".format(f_track, t_track))
+            messages[path].append('Track number mismatch: {} != {}'.format(f_track, t_track))
         # Check for lyrics and album art.
         if not ignore_art and not tags.pictures:
-            messages[path].append("No album art.")
+            messages[path].append('No album art.')
         if not ignore_lyrics and not tags.get('unsyncedlyrics', [False])[0]:
-            messages[path].append("No lyrics.")
+            messages[path].append('No lyrics.')
     # Return dict of messages without empty lists.
     return {k: v for k, v in messages.items() if v}
 
@@ -233,39 +235,39 @@ def find_empty_dirs(parent_dir):
 def main(config):
     logger = logging.getLogger('%s.main' % __name__)
 
-    logger.info("Finding files and verifying tags...")
+    logger.info('Finding files and verifying tags...')
     try:
         flac_files, delete_mp3s, create_dirs, foreign_files = find_files(config['flac_dir'], config['mp3_dir'])
     except IOError:
-        logger.error("No FLAC files found in directory {}".format(config['flac_dir']))
+        logger.error('No FLAC files found in directory {}'.format(config['flac_dir']))
         sys.exit(1)
     tag_warnings = find_inconsistent_tags(flac_files.keys(), config['ignore_art'], config['ignore_lyrics'])
     logger.info('; '.join([
-        "{} new FLAC {}".format(len(flac_files), 'file' if len(flac_files) == 1 else 'files'),
-        "{} new {}".format(len(create_dirs), 'directory' if len(create_dirs) == 1 else 'directories'),
-        "{} FLAC {}".format(len(tag_warnings), 'warning' if len(tag_warnings) == 1 else 'warnings'),
-        "{} {} to delete".format(len(delete_mp3s), 'mp3' if len(delete_mp3s) == 1 else 'mp3s'),
+        '{} new FLAC {}'.format(len(flac_files), 'file' if len(flac_files) == 1 else 'files'),
+        '{} new {}'.format(len(create_dirs), 'directory' if len(create_dirs) == 1 else 'directories'),
+        '{} FLAC {}'.format(len(tag_warnings), 'warning' if len(tag_warnings) == 1 else 'warnings'),
+        '{} {} to delete'.format(len(delete_mp3s), 'mp3' if len(delete_mp3s) == 1 else 'mp3s'),
     ]))
 
     # Delete mp3s with user's permission.
     if delete_mp3s:
-        logger.info(Color("{yellow}The following files need to be deleted:{/yellow}"))
+        logger.info(Color('{yellow}The following files need to be deleted:{/yellow}'))
         for path in delete_mp3s:
             logger.info(path)
-        raw_input(Color("{b}Press Enter to delete these files.{/b}"))
+        raw_input(Color('{b}Press Enter to delete these files.{/b}'))
         for path in delete_mp3s:
             os.remove(path)
 
     # Notify user of foreign files in mp3 directory.
     if foreign_files:
-        logger.info("{yellow}The following non-mp3 files were found:{/yellow}")
+        logger.info('{yellow}The following non-mp3 files were found:{/yellow}')
         for path in foreign_files:
             logger.info(path)
-        raw_input(Color("{b}Press Enter to continue anyway.{/b}"))
+        raw_input(Color('{b}Press Enter to continue anyway.{/b}'))
 
     # Notify user of inconsistencies in FLAC id3 tags and file names.
     if tag_warnings:
-        logger.info(Color("{yellow}The following inconsistencies have been found in id3 tags/file names:{/yellow}"))
+        logger.info(Color('{yellow}The following inconsistencies have been found in id3 tags/file names:{/yellow}'))
         printed_before = False
         for path, warnings in tag_warnings.items():
             if len(warnings) == 1:
@@ -279,7 +281,7 @@ def main(config):
                 for warning in warnings:
                     logger.info(warning)
                 print()
-        raw_input(Color("{b}Press Enter to continue anyway.{/b}"))
+        raw_input(Color('{b}Press Enter to continue anyway.{/b}'))
 
     # Create directories.
     for directory in create_dirs:
@@ -297,7 +299,7 @@ def main(config):
     # Start the conversion.
     total = len(flac_files)
     count = total
-    logger.info("Converting {} file{}:".format(total, '' if total == 1 else 's'))
+    logger.info('Converting {} file{}:'.format(total, '' if total == 1 else 's'))
     threads = []
     for i in range(config['threads']):
         thread = ConvertFiles(queue)
@@ -317,15 +319,15 @@ def main(config):
             # One or more thread isn't running.
             if queue.qsize():
                 # But the queue isn't empty, something bad happened.
-                raise RuntimeError("Worker thread(s) prematurely terminated.")
+                raise RuntimeError('Worker thread(s) prematurely terminated.')
 
     # Done, now clean up empty directories.
     empty_dirs = find_empty_dirs(config['mp3_dir'])
     if empty_dirs:
-        logger.info(Color("{yellow}The following empty directories were found:{/yellow}"))
+        logger.info(Color('{yellow}The following empty directories were found:{/yellow}'))
         for path in empty_dirs:
             logger.info(path)
-        raw_input(Color("{b}Press Enter to delete these directories.{/b}"))
+        raw_input(Color('{b}Press Enter to delete these directories.{/b}'))
         for path in delete_mp3s:
             os.rmdir(path)
 
@@ -354,36 +356,36 @@ def parse_n_check(docopt_config):
     if config['threads'] == 'automatic':
         config['threads'] = os.sysconf('SC_NPROCESSORS_ONLN') or 1
     elif not isinstance(config['threads'], int) or not config['threads']:
-        logger.error("--threads is not an integer or is zero: {}".format(config['threads']))
+        logger.error('--threads is not an integer or is zero: {}'.format(config['threads']))
         raise ValueError
     if not os.path.isfile(config['flac_bin']):
-        logger.error("--flac-bin-path is not a file or does not exist: {}".format(config['flac_bin']))
+        logger.error('--flac-bin-path is not a file or does not exist: {}'.format(config['flac_bin']))
         raise ValueError
     if not os.access(config['flac_bin'], os.R_OK | os.X_OK):
-        logger.error("--flac-bin-path is not readable or no execute permissions: {}".format(config['flac_bin']))
+        logger.error('--flac-bin-path is not readable or no execute permissions: {}'.format(config['flac_bin']))
         raise ValueError
     if not os.path.isfile(config['lame_bin']):
-        logger.error("--lame-bin-path is not a file or does not exist: {}".format(config['lame_bin']))
+        logger.error('--lame-bin-path is not a file or does not exist: {}'.format(config['lame_bin']))
         raise ValueError
     if not os.access(config['lame_bin'], os.R_OK | os.X_OK):
-        logger.error("--lame-bin-path is not readable or no execute permissions: {}".format(config['lame_bin']))
+        logger.error('--lame-bin-path is not readable or no execute permissions: {}'.format(config['lame_bin']))
         raise ValueError
     if not os.path.isdir(config['flac_dir']):
-        logger.error("<flac_dir> is not a directory or does not exist: {}".format(config['flac_dir']))
+        logger.error('<flac_dir> is not a directory or does not exist: {}'.format(config['flac_dir']))
         raise ValueError
     if not os.access(config['flac_dir'], os.R_OK | os.X_OK):
-        logger.error("<flac_dir> is not readable or no execute permissions: {}".format(config['flac_dir']))
+        logger.error('<flac_dir> is not readable or no execute permissions: {}'.format(config['flac_dir']))
         raise ValueError
     if not os.path.isdir(config['mp3_dir']):
-        logger.error("<mp3_dir> is not a directory or does not exist: {}".format(config['mp3_dir']))
+        logger.error('<mp3_dir> is not a directory or does not exist: {}'.format(config['mp3_dir']))
         raise ValueError
     if not os.access(config['mp3_dir'], os.W_OK | os.R_OK | os.X_OK):
-        logger.error("<mp3_dir> is not readable, writable, or no execute permissions: {}".format(config['mp3_dir']))
+        logger.error('<mp3_dir> is not readable, writable, or no execute permissions: {}'.format(config['mp3_dir']))
         raise ValueError
     return config
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     signal.signal(signal.SIGINT, lambda a, b: sys.exit(0))  # Properly handle Control+C
     try:
         cli_config_settings = parse_n_check(docopt(__doc__, version=__version__))
@@ -393,9 +395,9 @@ if __name__ == "__main__":
     # Initialize logging.
     with LoggingSetup() as cm:
         logging.config.fileConfig(cm.config)  # Setup logging.
-    sys.excepthook = lambda t, v, b: logging.critical("Uncaught exception!", exc_info=(t, v, b))  # Log exceptions.
-    atexit.register(lambda: logging.info("%s pid %d shutting down." % (__program__, os.getpid())))  # Log when exiting.
-    logging.info("Starting %s version %s" % (__program__, __version__))
+    sys.excepthook = lambda t, v, b: logging.critical('Uncaught exception!', exc_info=(t, v, b))  # Log exceptions.
+    atexit.register(lambda: logging.info('{} pid {} shutting down.'.format(__program__, os.getpid())))  # Log on exit.
+    logging.info('Starting %{} version {}'.format(__program__, __version__))
 
     # Run the program.
     main(cli_config_settings)

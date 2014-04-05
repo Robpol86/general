@@ -13,6 +13,7 @@ def test_good_values(capsys, threads):
         threads=threads,
         flac_dir='/tmp',
         mp3_dir='/tmp',
+        quiet=False,
     )
     argv = ['/tmp/', '/tmp', '--flac-bin-path=/bin/bash', '--lame-bin-path=/bin/bash']
     cli_config_settings = parse_n_check(docopt(convert_music__doc__, argv=argv))
