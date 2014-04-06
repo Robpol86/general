@@ -97,7 +97,11 @@ def test_art_lyrics(tmpdir):
         flac.write(f.read(), 'wb')
     tags = FLAC(str(flac.realpath()))
     tags.update(dict(artist='Artist2', date='2012', album='Album', tracknumber='01', title='Title', unsyncedlyrics='L'))
-    tags.add_picture(Picture())
+    image = Picture()
+    image.type, image.mime = 3, 'image/jpeg'
+    with open(os.path.join(os.path.dirname(__file__), '1_album_art.jpg'), 'rb') as f:
+        image.data = f.read()
+    tags.add_picture(image)
     tags.save()
     a_messages = find_inconsistent_tags([str(flac.realpath())], False, False)
     assert {} == a_messages

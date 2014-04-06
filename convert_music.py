@@ -31,8 +31,9 @@ import sys
 import threading
 import time
 from docopt import docopt
+from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC, error
-from mutagen.id3 import ID3
+from mutagen.id3 import ID3, APIC, USLT, COMM
 from color_logging_misc import LoggingSetup, Color
 
 
@@ -110,9 +111,31 @@ class ConvertFiles(threading.Thread):
         logger.debug('Removing: {}'.format(temp_wav_path))
         os.remove(temp_wav_path)
 
-    def write_tags(self, source_flac_path, temp_mp3_path):
+    @staticmethod
+    def write_tags(source_flac_path, temp_mp3_path):
         """Write mp3 id3 tags from tags available in the FLAC file. Also save metadata as JSON to mp3 comment tag."""
-        pass
+        # Copy non-picture/non-lyric tags from FLAC to mp3.
+        tags, id3 = FLAC(source_flac_path), EasyID3(temp_mp3_path)
+        for tag in (t for t in tags if t in EasyID3.valid_keys.keys()):
+            id3[tag] = tags[tag]
+        id3.save(v1=2)
+        # Copy pictures/lyrics from FLAC to mp3.
+        id3 = ID3(temp_mp3_path)
+        id3.add(COMM(encoding=3, lang='eng', desc='', text=(' ' * 200)))  # Pad ID3 tag to keep final size the same.
+        if tags.pictures:
+            pic = tags.pictures[0]
+            id3.add(APIC(encoding=0, mime=pic.mime, type=int(pic.type), desc=pic.desc, data=pic.data))
+        if 'unsyncedlyrics' in tags:
+            id3.add(USLT(encoding=0, lang='eng', desc='Lyrics', text=unicode(tags['unsyncedlyrics'][0])))
+        id3.save(v1=2)
+        # Save metadata to id3 comments tag.
+        flac_stat, mp3_stat = os.stat(source_flac_path), os.stat(temp_mp3_path)
+        comment = json.dumps(dict(
+            flac_mtime=int(flac_stat.st_mtime), flac_size=int(flac_stat.st_size),
+            mp3_mtime=int(mp3_stat.st_mtime), mp3_size=int(mp3_stat.st_size)
+        ))
+        id3.add(COMM(encoding=3, lang='eng', desc='', text=comment))
+        id3.save(v1=2)
 
 
 def find_files(flac_dir, mp3_dir):
