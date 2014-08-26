@@ -1,4 +1,4 @@
-PATH="/Library/Frameworks/Python.framework/Versions/3.4/bin:${PATH}"                                                    
+PATH="${PATH}:/Library/Frameworks/Python.framework/Versions/3.4/bin"
 export PATH
 
 export HISTCONTROL=erasedups
