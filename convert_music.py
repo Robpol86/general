@@ -10,16 +10,16 @@ Usage:
 Options:
     -a --ignore-art                 Ignore checks for missing album art.
     -f FILE --flac-bin-path=FILE    Specify path to flac binary file.
-                                    [default: /usr/bin/flac]
+                                    [default: /usr/local/bin/flac]
     -l FILE --lame-bin-path=FILE    Specify path to lame (mp3) binary file.
-                                    [default: /usr/bin/lame]
+                                    [default: /usr/local/bin/lame]
     -t NUM --threads=NUM            Thread count.
                                     [default: automatic]
     -y --ignore-lyrics              Ignore checks for missing lyric data.
 """
-from __future__ import print_function, division
+
+from __future__ import division, print_function
 import Queue
-import atexit
 import fnmatch
 import json
 import logging
@@ -30,15 +30,158 @@ import subprocess
 import sys
 import threading
 import time
+
+from colorclass import Color
 from docopt import docopt
 from mutagen.easyid3 import EasyID3
-from mutagen.flac import FLAC, error
-from mutagen.id3 import ID3, APIC, USLT, COMM
-from color_logging_misc import LoggingSetup, Color
+from mutagen.flac import FLAC, error as flac_error
+from mutagen.id3 import ID3, APIC, USLT, COMM, error as id3_error
+
+__version__ = '0.1.0'
+OPTIONS = docopt(__doc__) if __name__ == '__main__' else dict()
+PAD_COMMENT = 200  # Pad ID3 comment tag by this many spaces.
 
 
-__program__ = 'convert_music'
-__version__ = '0.0.3'
+class Song(object):
+    """An instance of a single song."""
+
+    INSTANCES = set()  # Overwritten once.
+
+    def __init__(self, flac_path, flac_dir, mp3_dir):
+        # Derive data from file path.
+        self.flac_path = flac_path
+        self.flac_name = os.path.basename(flac_path)
+        self.mp3_path = flac_path.replace(flac_dir, mp3_dir)[:-5] + '.mp3'
+        self.mp3_name = os.path.basename(self.mp3_path)
+        split = os.path.basename(self.flac_name)[:-5].split(' - ')
+        self.filename_artist, self.filename_date, self.filename_album, self.filename_track, self.filename_title = split
+
+        self.flac_current_mtime = None
+        self.flac_current_size = None
+        self.mp3_current_mtime = None
+        self.mp3_current_size = None
+
+        self.flac_stored_mtime = None
+        self.flac_stored_size = None
+        self.mp3_stored_mtime = None
+        self.mp3_stored_size = None
+
+        self.flac_artist = ''
+        self.flac_date = ''
+        self.flac_album = ''
+        self.flac_disc = ''
+        self.flac_track = ''
+        self.flac_title = ''
+        self.flac_has_lyrics = False
+        self.flac_has_picture = False
+
+    def get_metadata(self):
+        flac_stat = os.stat(self.flac_path)
+        self.flac_current_mtime, self.flac_current_size = int(flac_stat.st_mtime), int(flac_stat.st_size)
+        if os.path.exists(self.mp3_path):
+            mp3_stat = os.stat(self.mp3_path)
+            self.mp3_current_mtime, self.mp3_current_size = int(mp3_stat.st_mtime), int(mp3_stat.st_size)
+
+        try:
+            flac_tags = FLAC(self.flac_path)
+        except flac_error:
+            pass
+        else:
+            self.flac_artist = flac_tags.get('artist', [''])[0]
+            self.flac_date = flac_tags.get('date', [''])[0]
+            self.flac_album = flac_tags.get('album', [''])[0]
+            self.flac_disc = flac_tags.get('discnumber', [''])[0]
+            self.flac_track = flac_tags.get('tracknumber', [''])[0]
+            self.flac_title = flac_tags.get('title', [''])[0]
+            self.flac_has_lyrics = bool(flac_tags.get('unsyncedlyrics', [False])[0])
+            self.flac_has_picture = bool(flac_tags.pictures)
+
+        if not os.path.exists(self.mp3_path):
+            return
+
+        try:
+            mp3_tags = ID3(self.mp3_path)
+        except id3_error:
+            pass
+        else:
+            stored_metadata = json.loads(getattr(mp3_tags.get("COMM::'eng'"), 'text', ['{}'])[0])
+            self.flac_stored_mtime = stored_metadata.get('flac_mtime')
+            self.flac_stored_size = stored_metadata.get('flac_size')
+            self.mp3_stored_mtime = stored_metadata.get('mp3_mtime')
+            self.mp3_stored_size = stored_metadata.get('mp3_size')
+
+    @property
+    def bad_artist(self):
+        return self.filename_artist != self.flac_artist
+
+    @property
+    def bad_date(self):
+        if len(self.filename_date) != 4:
+            return True
+        if not self.filename_date.isdigit():
+            return True
+        return self.filename_date != self.flac_date
+
+    @property
+    def bad_album(self):
+        if self.filename_album == self.flac_album:
+            return False
+        if self.filename_album == '{} (Disc {})'.format(self.flac_album, self.flac_disc):
+            return False
+        return True
+
+    @property
+    def bad_track(self):
+        if len(self.filename_track) not in (2, 3):
+            return True
+        if not self.filename_track.isdigit():
+            return True
+        return self.filename_track != self.flac_track
+
+    @property
+    def bad_title(self):
+        return self.filename_title != self.flac_title
+
+    @property
+    def bad_lyrics(self):
+        if OPTIONS.get('--ignore-lyrics', False):
+            return False
+        return not self.flac_has_lyrics
+
+    @property
+    def bad_picture(self):
+        if OPTIONS.get('--ignore-art', False):
+            return False
+        return not self.flac_has_picture
+
+    @property
+    def metadata_ok(self):
+        status = [self.bad_artist, self.bad_date, self.bad_album, self.bad_track, self.bad_title, self.bad_lyrics,
+                  self.bad_picture]
+        return not any(status)
+
+    @property
+    def skip_conversion(self):
+        status = [
+            self.flac_current_mtime == self.flac_stored_mtime,
+            self.flac_current_size == self.flac_stored_size,
+            self.mp3_current_mtime == self.mp3_stored_mtime,
+            self.mp3_current_size == self.mp3_stored_size,
+        ]
+        return all(status)
+
+
+def error(message, code=1):
+    """Prints an error message to stderr and exits with a status of 1 by default."""
+    if message:
+        print('ERROR: {}'.format(message), file=sys.stderr)
+    else:
+        print(file=sys.stderr)
+    sys.exit(code)
+
+
+
+
 
 
 class ConvertFiles(threading.Thread):
@@ -64,51 +207,51 @@ class ConvertFiles(threading.Thread):
     def run(self):
         """The main body of the thread. Loops until queue is empty."""
         logger = logging.getLogger('ConvertFiles.run.{}'.format(self.name))
-        logger.debug('Worker thread started.')
+        logging.debug('Worker thread started.')
         while True:
             try:
                 source_flac_path, temp_wav_path, temp_mp3_path, destination_mp3_path = self.queue.get_nowait()
             except Queue.Empty:
                 break
-            logger.debug('Source FLAC path: {}'.format(source_flac_path))
-            logger.debug('Temporary wav path: {}'.format(temp_wav_path))
-            logger.debug('Temporary mp3 path: {}'.format(temp_mp3_path))
-            logger.debug('Final mp3 path: {}'.format(destination_mp3_path))
+            logging.debug('Source FLAC path: {}'.format(source_flac_path))
+            logging.debug('Temporary wav path: {}'.format(temp_wav_path))
+            logging.debug('Temporary mp3 path: {}'.format(temp_mp3_path))
+            logging.debug('Final mp3 path: {}'.format(destination_mp3_path))
             self.convert(source_flac_path, temp_wav_path, temp_mp3_path)
             self.write_tags(source_flac_path, temp_mp3_path)
             os.rename(temp_mp3_path, destination_mp3_path)
-            logger.debug('Done converting this file.')
-        logger.debug('Worker thread exiting.')
+            logging.debug('Done converting this file.')
+        logging.debug('Worker thread exiting.')
 
     def convert(self, source_flac_path, temp_wav_path, temp_mp3_path):
         """Converts the FLAC file into an mp3 file with a temporary filename."""
         logger = logging.getLogger('ConvertFiles.convert.{}'.format(self.name))
         # First decompress.
         command = [self.flac_bin, '--silent', '--decode', '-o', temp_wav_path, source_flac_path]
-        logger.debug('Command: {}'.format(' '.join(command)))
+        logging.debug('Command: {}'.format(' '.join(command)))
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         while process.poll() is None:
             time.sleep(0.2)  # Wait for process to finish.
         code = process.returncode
         stdout, stderr = process.communicate()
-        logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        logging.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
         if code:
             raise RuntimeError('Process {} returned {}; stdout: {}; stderr: {};'.format(self.flac_bin, code, stdout,
                                                                                         stderr))
         # Then compress.
         command = [self.lame_bin, '--quiet', '-h', '-V0', temp_wav_path, temp_mp3_path]
-        logger.debug('Command: {}'.format(' '.join(command)))
+        logging.debug('Command: {}'.format(' '.join(command)))
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         while process.poll() is None:
             time.sleep(0.2)  # Wait for process to finish.
         code = process.returncode
         stdout, stderr = process.communicate()
-        logger.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
+        logging.debug('code: {}; stdout: {}; stderr: {};'.format(code, stdout, stderr))
         if code:
             raise RuntimeError('Process {} returned {}; stdout: {}; stderr: {};'.format(self.lame_bin, code, stdout,
                                                                                         stderr))
         # Delete wav file by-product.
-        logger.debug('Removing: {}'.format(temp_wav_path))
+        logging.debug('Removing: {}'.format(temp_wav_path))
         os.remove(temp_wav_path)
 
     @staticmethod
@@ -227,7 +370,7 @@ def find_inconsistent_tags(flac_filepaths, ignore_art=False, ignore_lyrics=False
         # Verify basic tags.
         try:
             tags = FLAC(path)
-        except error:
+        except flac_error:
             messages[path].append('Invalid file.')
             continue
         t_artist, t_date, t_album, t_track, t_title = [tags.get(i, [''])[0] for i in tag_names]
@@ -282,17 +425,16 @@ def find_empty_dirs(parent_dir):
     return sorted(dirs_to_remove, reverse=True)
 
 
-def main(config):
-    logger = logging.getLogger('%s.main' % __name__)
+def main():
 
-    logger.info('Finding files and verifying tags...')
+    logging.info('Finding files and verifying tags...')
     try:
-        flac_files, delete_mp3s, create_dirs, foreign_files = find_files(config['flac_dir'], config['mp3_dir'])
+        flac_files, delete_mp3s, create_dirs, foreign_files = find_files(OPTIONS['flac_dir'], OPTIONS['mp3_dir'])
     except IOError:
-        logger.error('No FLAC files found in directory {}'.format(config['flac_dir']))
+        logging.error('No FLAC files found in directory {}'.format(OPTIONS['flac_dir']))
         sys.exit(1)
-    tag_warnings = find_inconsistent_tags(flac_files.keys(), config['ignore_art'], config['ignore_lyrics'])
-    logger.info('; '.join([
+    tag_warnings = find_inconsistent_tags(flac_files.keys(), OPTIONS['ignore_art'], OPTIONS['ignore_lyrics'])
+    logging.info('; '.join([
         '{} new FLAC {}'.format(len(flac_files), 'file' if len(flac_files) == 1 else 'files'),
         '{} new {}'.format(len(create_dirs), 'directory' if len(create_dirs) == 1 else 'directories'),
         '{} FLAC {}'.format(len(tag_warnings), 'warning' if len(tag_warnings) == 1 else 'warnings'),
@@ -301,35 +443,35 @@ def main(config):
 
     # Delete mp3s with user's permission.
     if delete_mp3s:
-        logger.info(Color('{yellow}The following files need to be deleted:{/yellow}'))
+        logging.info(Color('{yellow}The following files need to be deleted:{/yellow}'))
         for path in delete_mp3s:
-            logger.info(path)
+            logging.info(path)
         raw_input(Color('{b}Press Enter to delete these files.{/b}'))
         for path in delete_mp3s:
             os.remove(path)
 
     # Notify user of foreign files in mp3 directory.
     if foreign_files:
-        logger.info('{yellow}The following non-mp3 files were found:{/yellow}')
+        logging.info('{yellow}The following non-mp3 files were found:{/yellow}')
         for path in foreign_files:
-            logger.info(path)
+            logging.info(path)
         raw_input(Color('{b}Press Enter to continue anyway.{/b}'))
 
     # Notify user of inconsistencies in FLAC id3 tags and file names.
     if tag_warnings:
-        logger.info(Color('{yellow}The following inconsistencies have been found in id3 tags/file names:{/yellow}'))
+        logging.info(Color('{yellow}The following inconsistencies have been found in id3 tags/file names:{/yellow}'))
         printed_before = False
         for path, warnings in tag_warnings.items():
             if len(warnings) == 1:
                 printed_before = True
-                logger.info('{}: {}'.format(os.path.basename(path), warnings[0]))
+                logging.info('{}: {}'.format(os.path.basename(path), warnings[0]))
             else:
                 if printed_before:
                     print()
                     printed_before = False
-                logger.info('{}:'.format(os.path.basename(path)))
+                logging.info('{}:'.format(os.path.basename(path)))
                 for warning in warnings:
-                    logger.info(warning)
+                    logging.info(warning)
                 print()
         raw_input(Color('{b}Press Enter to continue anyway.{/b}'))
 
@@ -338,11 +480,11 @@ def main(config):
         os.makedirs(directory)
 
     # Prepare for conversion.
-    ConvertFiles.flac_bin = config['flac_bin']
-    ConvertFiles.lame_bin = config['lame_bin']
+    ConvertFiles.flac_bin = OPTIONS['flac_bin']
+    ConvertFiles.lame_bin = OPTIONS['lame_bin']
     queue = Queue.Queue()
     for flac_file in flac_files:
-        mp3_file = flac_file.replace(config['flac_dir'], config['mp3_dir'])  # Change directories from flac to mp3 dir.
+        mp3_file = flac_file.replace(OPTIONS['flac_dir'], OPTIONS['mp3_dir'])  # Change directories from flac to mp3 dir.
         temp_wav_file = os.path.splitext(mp3_file)[0] + '.wav.part'  # Temporary file while converting (FLAC -> wav).
         temp_mp3_file = os.path.splitext(mp3_file)[0] + '.mp3.part'  # Temporary file while converting (wav -> mp3).
         final_mp3_file = os.path.splitext(mp3_file)[0] + '.mp3'  # Final mp3 filename.
@@ -351,9 +493,9 @@ def main(config):
     # Start the conversion.
     total = len(flac_files)
     count = total
-    logger.info('Converting {} file{}:'.format(total, '' if total == 1 else 's'))
+    logging.info('Converting {} file{}:'.format(total, '' if total == 1 else 's'))
     threads = []
-    for i in range(config['threads']):
+    for i in range(OPTIONS['threads']):
         thread = ConvertFiles(queue)
         thread.daemon = True  # Fixes script hang on ctrl+c.
         thread.start()
@@ -361,95 +503,82 @@ def main(config):
 
     # Wait for everything to finish.
     while count:
-        if not config['quiet']:
+        if not OPTIONS['quiet']:
             sys.stdout.write('{}/{} ({:02d}%) files remaining...\r'.format(count, total, count / total))
             sys.stdout.flush()
         time.sleep(1)
         count = queue.qsize() + len([True for t in threads if t.is_alive()])
         # Look for threads that crashed.
-        if len([t for t in threads if t.is_alive()]) < config['threads']:
+        if len([t for t in threads if t.is_alive()]) < OPTIONS['threads']:
             # One or more thread isn't running.
             if queue.qsize():
                 # But the queue isn't empty, something bad happened.
                 raise RuntimeError('Worker thread(s) prematurely terminated.')
 
     # Done, now clean up empty directories.
-    empty_dirs = find_empty_dirs(config['mp3_dir'])
+    empty_dirs = find_empty_dirs(OPTIONS['mp3_dir'])
     if empty_dirs:
-        logger.info(Color('{yellow}The following empty directories were found:{/yellow}'))
+        logging.info(Color('{yellow}The following empty directories were found:{/yellow}'))
         for path in empty_dirs:
-            logger.info(path)
+            logging.info(path)
         raw_input(Color('{b}Press Enter to delete these directories.{/b}'))
         for path in delete_mp3s:
             os.rmdir(path)
 
 
-def parse_n_check(docopt_config):
+def validate_options():
     """Re-formats dict from docopt and does some sanity checks on it.
 
     Positional arguments:
-    docopt_config -- dictionary from docopt.docopt().
+    OPTIONS -- dictionary from docopt.docopt().
 
     Returns:
-    Dictionary similar to docopt_config but only relevant data without CLI notation.
+    Dictionary similar to OPTIONS but only relevant data without CLI notation.
     """
     logger = logging.getLogger('%s.parse_n_check' % __name__)
     config = dict(
-        flac_bin=os.path.abspath(os.path.expanduser(docopt_config.get('--flac-bin-path'))),
-        lame_bin=os.path.abspath(os.path.expanduser(docopt_config.get('--lame-bin-path'))),
-        ignore_art=bool(docopt_config.get('--ignore-art')),
-        ignore_lyrics=bool(docopt_config.get('--ignore-lyrics')),
-        threads=docopt_config.get('--threads'),
-        flac_dir=os.path.abspath(os.path.expanduser(docopt_config.get('<flac_dir>'))),
-        mp3_dir=os.path.abspath(os.path.expanduser(docopt_config.get('<mp3_dir>'))),
+        flac_bin=os.path.abspath(os.path.expanduser(OPTIONS.get('--flac-bin-path'))),
+        lame_bin=os.path.abspath(os.path.expanduser(OPTIONS.get('--lame-bin-path'))),
+        ignore_art=bool(OPTIONS.get('--ignore-art')),
+        ignore_lyrics=bool(OPTIONS.get('--ignore-lyrics')),
+        threads=OPTIONS.get('--threads'),
+        flac_dir=os.path.abspath(os.path.expanduser(OPTIONS.get('<flac_dir>'))),
+        mp3_dir=os.path.abspath(os.path.expanduser(OPTIONS.get('<mp3_dir>'))),
         quiet=False,
     )
     # Sanity checks.
-    if config['threads'] == 'automatic':
-        config['threads'] = os.sysconf('SC_NPROCESSORS_ONLN') or 1
-    elif not isinstance(config['threads'], int) or not config['threads']:
-        logger.error('--threads is not an integer or is zero: {}'.format(config['threads']))
+    if OPTIONS['threads'] == 'automatic':
+        OPTIONS['threads'] = os.sysconf('SC_NPROCESSORS_ONLN') or 1
+    elif not isinstance(OPTIONS['threads'], int) or not OPTIONS['threads']:
+        logging.error('--threads is not an integer or is zero: {}'.format(OPTIONS['threads']))
         raise ValueError
-    if not os.path.isfile(config['flac_bin']):
-        logger.error('--flac-bin-path is not a file or does not exist: {}'.format(config['flac_bin']))
+    if not os.path.isfile(OPTIONS['flac_bin']):
+        logging.error('--flac-bin-path is not a file or does not exist: {}'.format(OPTIONS['flac_bin']))
         raise ValueError
-    if not os.access(config['flac_bin'], os.R_OK | os.X_OK):
-        logger.error('--flac-bin-path is not readable or no execute permissions: {}'.format(config['flac_bin']))
+    if not os.access(OPTIONS['flac_bin'], os.R_OK | os.X_OK):
+        logging.error('--flac-bin-path is not readable or no execute permissions: {}'.format(OPTIONS['flac_bin']))
         raise ValueError
-    if not os.path.isfile(config['lame_bin']):
-        logger.error('--lame-bin-path is not a file or does not exist: {}'.format(config['lame_bin']))
+    if not os.path.isfile(OPTIONS['lame_bin']):
+        logging.error('--lame-bin-path is not a file or does not exist: {}'.format(OPTIONS['lame_bin']))
         raise ValueError
-    if not os.access(config['lame_bin'], os.R_OK | os.X_OK):
-        logger.error('--lame-bin-path is not readable or no execute permissions: {}'.format(config['lame_bin']))
+    if not os.access(OPTIONS['lame_bin'], os.R_OK | os.X_OK):
+        logging.error('--lame-bin-path is not readable or no execute permissions: {}'.format(OPTIONS['lame_bin']))
         raise ValueError
-    if not os.path.isdir(config['flac_dir']):
-        logger.error('<flac_dir> is not a directory or does not exist: {}'.format(config['flac_dir']))
+    if not os.path.isdir(OPTIONS['flac_dir']):
+        logging.error('<flac_dir> is not a directory or does not exist: {}'.format(OPTIONS['flac_dir']))
         raise ValueError
-    if not os.access(config['flac_dir'], os.R_OK | os.X_OK):
-        logger.error('<flac_dir> is not readable or no execute permissions: {}'.format(config['flac_dir']))
+    if not os.access(OPTIONS['flac_dir'], os.R_OK | os.X_OK):
+        logging.error('<flac_dir> is not readable or no execute permissions: {}'.format(OPTIONS['flac_dir']))
         raise ValueError
-    if not os.path.isdir(config['mp3_dir']):
-        logger.error('<mp3_dir> is not a directory or does not exist: {}'.format(config['mp3_dir']))
+    if not os.path.isdir(OPTIONS['mp3_dir']):
+        logging.error('<mp3_dir> is not a directory or does not exist: {}'.format(OPTIONS['mp3_dir']))
         raise ValueError
-    if not os.access(config['mp3_dir'], os.W_OK | os.R_OK | os.X_OK):
-        logger.error('<mp3_dir> is not readable, writable, or no execute permissions: {}'.format(config['mp3_dir']))
+    if not os.access(OPTIONS['mp3_dir'], os.W_OK | os.R_OK | os.X_OK):
+        logging.error('<mp3_dir> is not readable, writable, or no execute permissions: {}'.format(OPTIONS['mp3_dir']))
         raise ValueError
     return config
 
 
 if __name__ == '__main__':
-    signal.signal(signal.SIGINT, lambda a, b: sys.exit(0))  # Properly handle Control+C
-    try:
-        cli_config_settings = parse_n_check(docopt(__doc__, version=__version__))
-    except ValueError:
-        sys.exit(1)
-
-    # Initialize logging.
-    with LoggingSetup() as cm:
-        logging.config.fileConfig(cm.config)  # Setup logging.
-    sys.excepthook = lambda t, v, b: logging.critical('Uncaught exception!', exc_info=(t, v, b))  # Log exceptions.
-    atexit.register(lambda: logging.info('{} pid {} shutting down.'.format(__program__, os.getpid())))  # Log on exit.
-    logging.info('Starting %{} version {}'.format(__program__, __version__))
-
-    # Run the program.
-    main(cli_config_settings)
+    signal.signal(signal.SIGINT, lambda *_: error('', 0))  # Properly handle Control+C
+    main()
