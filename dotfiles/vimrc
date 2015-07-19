@@ -1,7 +1,7 @@
+"set colorcolumn=120
 colorscheme ron
 filetype indent plugin on
 set backspace=indent,eol,start
-set colorcolumn=120
 set expandtab
 set hlsearch
 set laststatus=2
